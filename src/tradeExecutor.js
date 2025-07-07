@@ -1,138 +1,266 @@
 // src/tradeExecutor.js
+const { Connection, Keypair, VersionedTransaction, SystemProgram, LAMPORTS_PER_SOL } = require('@solana/web3.js');
+const bs58 = require('bs58');
 const fetch = require('node-fetch').default;
-
-// Import bs58 in a way that works with both CommonJS and ES exports
-let bs58;
-try {
-  // If bs58 has a `.default`, use it; otherwise fall back
-  const imported = require('bs58');
-  bs58 = imported.default ? imported.default : imported;
-} catch (err) {
-  // Fallback if require('bs58') fails somehow
-  bs58 = require('bs58');
-}
-
-const { Keypair, VersionedTransaction } = require('@solana/web3.js');
-const config = require('./config');
+const config = require('./config'); // Hanya untuk variabel global seperti SOLANA_RPC, JITO_ENGINE
 const { info, error } = require('./logger');
 
+// Inisialisasi Solana Connection
+const connection = new Connection(config.SOLANA_RPC, 'confirmed');
+
 /**
- * Sign & send a VersionedTransaction via Jito.
- * @param base64Txn  - base64‐encoded VersionedTransaction from SolanaPortal
- * @returns          - signature string
+ * Helper to get Jupiter quote
  */
-async function signAndSendViaJito(base64Txn) {
-  // Use bs58.decode and bs58.encode, regardless of how bs58 was imported
-  const secretKey = bs58.decode(config.PRIVATE_KEY);
-  const walletKeypair = Keypair.fromSecretKey(secretKey);
-
-  const txBuffer = Buffer.from(base64Txn, 'base64');
-  const tx = VersionedTransaction.deserialize(txBuffer);
-  tx.sign([walletKeypair]);
-  const signedTxBuffer = tx.serialize();
-  const signedTx = bs58.encode(signedTxBuffer);
-
-  const jitoPayload = {
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'sendTransaction',
-    params: [signedTx]
-  };
-
-  const res = await fetch(config.JITO_ENGINE, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(jitoPayload)
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Jito sendTransaction failed: ${res.status} ${res.statusText} | ${text}`);
-  }
-  const jitoData = await res.json();
-  if (!jitoData.result) {
-    throw new Error(`Jito did not return a result: ${JSON.stringify(jitoData)}`);
-  }
-  return jitoData.result;
+async function getJupiterQuote(inputMint, outputMint, amount, slippageBps, swapMode = 'ExactIn') {
+    const url = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&swapMode=${swapMode}&slippageBps=${slippageBps}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Failed to get Jupiter quote (HTTP ${response.status}): ${text}`);
+    }
+    return response.json();
 }
 
 /**
- * Call SolanaPortal trading endpoint to get a VersionedTransaction (base64).
- * @param params  - { wallet_address, action, dex, mint, amount, slippage, tip, type }
- * @returns       - base64‐encoded VersionedTransaction
+ * Helper to get Jupiter swap transaction
  */
-async function getPortalTxn(params) {
-  const url = 'https://api.solanaportal.io/api/trading';
-  //const url = 'http://localhost:3002/api/trading';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params)
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`SolanaPortal responded ${res.status} ${res.statusText}: ${txt}`);
-  }
-  const data = await res.json();
-  return data; // base64 VersionedTransaction
+async function getJupiterSwapTransaction(quoteResponse, userPublicKey) {
+    const url = 'https://quote-api.jup.ag/v6/swap';
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            quoteResponse,
+            userPublicKey: userPublicKey.toBase58(),
+            wrapUnwrapSol: true, // Auto wrap/unwrap SOL
+        })
+    });
+    if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Failed to get Jupiter swap transaction (HTTP ${response.status}): ${text}`);
+    }
+    const { swapTransaction } = await response.json();
+    return swapTransaction;
 }
 
 /**
- * Buy a token. Returns the signature string.
- * @param mint        - token mint address
- * @param amountSol   - SOL amount to spend
- * @param slippage    - percent
- * @param tip         - SOL tip for Jito
- * @param dex         - 'pumpfun', 'jupiter', etc.
+ * Send bundle to Jito (if Jito is enabled)
  */
-async function buyToken({ mint, amountSol, slippage, tip, dex }) {
-  info(
-    `[tradeExecutor] Placing BUY order: mint=${mint}, amountSol=${amountSol}, ` +
-      `dex=${dex}, slippage=${slippage}%, tip=${tip} SOL`
-  );
-  const params = {
-    wallet_address: config.PUBLIC_KEY,
-    action: 'buy',
-    dex,
-    mint,
-    amount: amountSol,
-    slippage,
-    tip,
-    type: 'jito'
-  };
-  const portalBase64 = await getPortalTxn(params);
-  const signature = await signAndSendViaJito(portalBase64);
-  info(`[tradeExecutor] BUY txn sent: https://solscan.io/tx/${signature}`);
-  return signature;
+async function sendBundleToJito(signedTransactions) {
+    if (!config.JITO_ENGINE) {
+        throw new Error("Jito engine URL not configured in global config.");
+    }
+
+    const encodedTxs = signedTransactions.map(tx => bs58.encode(tx.serialize()));
+
+    const response = await fetch(`${config.JITO_ENGINE}/bundles`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'sendBundle',
+            params: [encodedTxs]
+        })
+    });
+
+    const data = await response.json();
+    if (data.error) {
+        throw new Error(`Jito error: ${data.error.message}`);
+    }
+    return data.result.bundleId;
 }
 
 /**
- * Sell a token. Returns the signature string.
- * @param mint          - token mint address
- * @param amountTokens  - number of tokens to sell
- * @param slippage      - percent
- * @param tip           - SOL tip for Jito
- * @param dex           - 'pumpfun', 'jupiter', etc.
+ * Buy a token.
+ * @param {object} tradeParams - { mint, amountSol }
+ * @param {object} userSettings - { slippage, jitoTip, preferredDex }
+ * @param {Keypair} payerKeypair - The Keypair of the user's wallet to sign the transaction
+ * @returns {Promise<string>} Transaction signature
  */
-async function sellToken({ mint, amountTokens, slippage, tip, dex }) {
-  info(
-    `[tradeExecutor] Placing SELL order: mint=${mint}, tokenAmount=${amountTokens}, ` +
-      `dex=${dex}, slippage=${slippage}%, tip=${tip} SOL`
-  );
-  const params = {
-    wallet_address: config.PUBLIC_KEY,
-    action: 'sell',
-    dex,
-    mint,
-    amount: amountTokens,
-    slippage,
-    tip,
-    type: 'jito'
-  };
-  const portalBase64 = await getPortalTxn(params);
-  const signature = await signAndSendViaJito(portalBase64);
-  info(`[tradeExecutor] SELL txn sent: https://solscan.io/tx/${signature}`);
-  return signature;
+async function buyToken(tradeParams, userSettings, payerKeypair) {
+    const { mint, amountSol } = tradeParams;
+    const { slippage, jitoTip, preferredDex } = userSettings; // Ambil dari userSettings
+
+    info(`Attempting to buy ${amountSol} SOL worth of ${mint} for user ${payerKeypair.publicKey.toBase58()} on ${preferredDex}...`);
+
+    const inputMint = new PublicKey('So11111111111111111111111111111111111111112'); // SOL mint address
+    const outputMint = new PublicKey(mint);
+    const amountInLamports = Math.round(amountSol * LAMPORTS_PER_SOL); // Pastikan integer untuk lamports
+    const slippageBps = slippage * 100; // Konversi persen ke basis poin
+
+    try {
+        // 1. Get quote from Jupiter
+        const quoteResponse = await getJupiterQuote(inputMint.toBase58(), outputMint.toBase58(), amountInLamports, slippageBps);
+        info(`Jupiter quote received. Estimated out amount: ${quoteResponse.outAmount / (10 ** quoteResponse.outputMint.decimals)}`);
+
+        // 2. Get swap transaction from Jupiter
+        const swapTransaction = await getJupiterSwapTransaction(quoteResponse, payerKeypair.publicKey);
+        const transaction = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
+
+        // 3. Add Jito tip if configured and Jito engine is available
+        let transactionsToBundle = [transaction];
+        if (jitoTip > 0 && config.JITO_ENGINE && config.JITO_TIP_ACCOUNT) {
+            const tipLamports = Math.round(jitoTip * LAMPORTS_PER_SOL);
+            const tipAccount = new PublicKey(config.JITO_TIP_ACCOUNT);
+            
+            // Create a separate tip transaction
+            const tipTx = new VersionedTransaction(new TransactionMessage({
+                payerKey: payerKeypair.publicKey,
+                recentBlockhash: (await connection.getLatestBlockhash('finalized')).blockhash,
+                instructions: [
+                    SystemProgram.transfer({
+                        fromPubkey: payerKeypair.publicKey,
+                        toPubkey: tipAccount,
+                        lamports: tipLamports,
+                    })
+                ]
+            }).compileToLegacyMessage()); // Legacy message for simple transfers if not requiring complex versioned tx
+
+            transactionsToBundle.push(tipTx);
+            info(`Adding Jito tip of ${jitoTip} SOL.`);
+        }
+
+        // 4. Sign all transactions in the bundle
+        transactionsToBundle = transactionsToBundle.map(tx => {
+            tx.sign([payerKeypair]);
+            return tx;
+        });
+
+        // 5. Send transaction (either directly to RPC or via Jito)
+        let signature;
+        if (config.JITO_ENGINE) {
+            info('Sending transaction via Jito bundle...');
+            const bundleId = await sendBundleToJito(transactionsToBundle);
+            info(`Bundle sent to Jito: ${bundleId}`);
+            // Jito returns bundle ID, you might need to poll for individual tx signatures
+            signature = transactionsToBundle[0].signatures[0].toBase58(); // Primary tx signature as placeholder
+        } else {
+            info('Sending transaction directly to Solana RPC (Jito not configured or disabled)...');
+            if (transactionsToBundle.length > 1) {
+                warn('Multiple transactions (swap + tip) cannot be sent atomically without Jito bundle or other services.');
+                // For non-Jito, send swap and tip separately if needed
+                const swapSig = await connection.sendTransaction(transactionsToBundle[0], { skipPreflight: false });
+                info(`Swap transaction sent: ${swapSig}`);
+                await connection.confirmTransaction(swapSig, 'confirmed');
+                signature = swapSig;
+                // You might send tipTx separately here if needed
+            } else {
+                const swapSig = await connection.sendTransaction(transactionsToBundle[0], { skipPreflight: false });
+                info(`Transaction sent: ${swapSig}`);
+                await connection.confirmTransaction(swapSig, 'confirmed');
+                signature = swapSig;
+            }
+        }
+
+        info(`Buy transaction confirmed: ${signature}`);
+        return signature;
+
+    } catch (e) {
+        error(`Failed to execute buy trade for ${mint}: ${e.message}`);
+        throw e;
+    }
 }
 
-module.exports = { buyToken, sellToken };
+/**
+ * Sell a token.
+ * @param {object} tradeParams - { mint, tokenAmount }
+ * @param {object} userSettings - { slippage, jitoTip, preferredDex }
+ * @param {Keypair} payerKeypair - The Keypair of the user's wallet to sign the transaction
+ * @returns {Promise<string>} Transaction signature
+ */
+async function sellToken(tradeParams, userSettings, payerKeypair) {
+    const { mint, tokenAmount } = tradeParams;
+    const { slippage, jitoTip, preferredDex } = userSettings; // Ambil dari userSettings
+
+    info(`Attempting to sell ${tokenAmount} of ${mint} for user ${payerKeypair.publicKey.toBase58()} on ${preferredDex}...`);
+
+    const inputMint = new PublicKey(mint);
+    const outputMint = new PublicKey('So11111111111111111111111111111111111111112'); // SOL mint address
+    const slippageBps = slippage * 100; // Konversi persen ke basis poin
+
+    try {
+        // Get token's decimals
+        const tokenMintAccount = await connection.getParsedAccountInfo(inputMint);
+        if (!tokenMintAccount || !tokenMintAccount.value) {
+            throw new Error(`Could not find token mint account info for ${mint}`);
+        }
+        const decimals = tokenMintAccount.value.data.parsed.info.decimals;
+        const amountInLamports = Math.round(tokenAmount * (10 ** decimals));
+
+        // 1. Get quote from Jupiter
+        const quoteResponse = await getJupiterQuote(inputMint.toBase58(), outputMint.toBase58(), amountInLamports, slippageBps);
+        info(`Jupiter quote received. Estimated out amount (SOL): ${quoteResponse.outAmount / LAMPORTS_PER_SOL}`);
+
+        // 2. Get swap transaction from Jupiter
+        const swapTransaction = await getJupiterSwapTransaction(quoteResponse, payerKeypair.publicKey);
+        const transaction = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
+
+        // 3. Add Jito tip (similar logic as buyToken)
+        let transactionsToBundle = [transaction];
+        if (jitoTip > 0 && config.JITO_ENGINE && config.JITO_TIP_ACCOUNT) {
+            const tipLamports = Math.round(jitoTip * LAMPORTS_PER_SOL);
+            const tipAccount = new PublicKey(config.JITO_TIP_ACCOUNT);
+            
+            const tipTx = new VersionedTransaction(new TransactionMessage({
+                payerKey: payerKeypair.publicKey,
+                recentBlockhash: (await connection.getLatestBlockhash('finalized')).blockhash,
+                instructions: [
+                    SystemProgram.transfer({
+                        fromPubkey: payerKeypair.publicKey,
+                        toPubkey: tipAccount,
+                        lamports: tipLamports,
+                    })
+                ]
+            }).compileToLegacyMessage());
+
+            transactionsToBundle.push(tipTx);
+            info(`Adding Jito tip of ${jitoTip} SOL.`);
+        }
+
+        // 4. Sign all transactions in the bundle
+        transactionsToBundle = transactionsToBundle.map(tx => {
+            tx.sign([payerKeypair]);
+            return tx;
+        });
+
+        // 5. Send transaction
+        let signature;
+        if (config.JITO_ENGINE) {
+            info('Sending transaction via Jito bundle...');
+            const bundleId = await sendBundleToJito(transactionsToBundle);
+            info(`Bundle sent to Jito: ${bundleId}`);
+            signature = transactionsToBundle[0].signatures[0].toBase58();
+        } else {
+             info('Sending transaction directly to Solana RPC (Jito not configured or disabled)...');
+            if (transactionsToBundle.length > 1) {
+                warn('Multiple transactions (swap + tip) cannot be sent atomically without Jito bundle or other services.');
+                const swapSig = await connection.sendTransaction(transactionsToBundle[0], { skipPreflight: false });
+                info(`Swap transaction sent: ${swapSig}`);
+                await connection.confirmTransaction(swapSig, 'confirmed');
+                signature = swapSig;
+            } else {
+                const swapSig = await connection.sendTransaction(transactionsToBundle[0], { skipPreflight: false });
+                info(`Transaction sent: ${swapSig}`);
+                await connection.confirmTransaction(swapSig, 'confirmed');
+                signature = swapSig;
+            }
+        }
+
+        info(`Sell transaction confirmed: ${signature}`);
+        return signature;
+
+    } catch (e) {
+        error(`Failed to execute sell trade for ${mint}: ${e.message}`);
+        throw e;
+    }
+}
+
+module.exports = {
+    buyToken,
+    sellToken,
+};
