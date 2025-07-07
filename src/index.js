@@ -140,15 +140,13 @@ bot.on('callback_query', async (query) => {
     const data = query.data;
     await bot.answerCallbackQuery(query.id); // dismiss the loading state on the button
 
-    const userData = await storage.getUserData(chatId);
-    if (!userData) {
-        bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
-        return;
-    }
-    let userSettings = userData.settings || DEFAULT_USER_SETTINGS;
+    // Pindahkan pengecekan userData ke dalam blok yang relevan
+    // Artinya, logika create_wallet dan import_wallet TIDAK PERLU cek userData di awal
 
     if (data === 'create_wallet') {
         const newWallet = generateWallet();
+        // Ambil pengaturan yang ada atau default jika baru
+        const userSettings = await storage.getUserSettings(chatId) || DEFAULT_USER_SETTINGS;
         await storage.saveUserData(chatId, newWallet.publicKey, newWallet.privateKey, userSettings);
         bot.sendMessage(
             chatId,
@@ -167,11 +165,18 @@ bot.on('callback_query', async (query) => {
             `\n\n*PERINGATAN: Mengimpor Private Key sangat berisiko. Lakukan dengan risiko Anda sendiri!*`
         );
     } else if (data.startsWith('buy_token_')) {
+        // Pengecekan userData diperlukan di sini karena ini adalah aksi yang memerlukan wallet
+        const userData = await storage.getUserData(chatId); // Cek userData DI SINI
+        if (!userData) {
+            bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
+            return; // Penting: keluar dari fungsi jika tidak ada wallet
+        }
+
         const [, mint, solAmountStr] = data.split('_');
         const solAmount = parseFloat(solAmountStr);
 
         userStates.set(chatId, { 
-            step: 'confirm_private_key_for_buy', // Langkah konfirmasi PK untuk transaksi
+            step: 'confirm_private_key_for_buy', 
             data: { mint, solAmount } 
         });
 
@@ -186,6 +191,14 @@ bot.on('callback_query', async (query) => {
     } 
     // --- Setting Buttons ---
     else if (data.startsWith('set_')) {
+        // Pengecekan userData diperlukan di sini karena ini adalah aksi yang memerlukan wallet
+        const userData = await storage.getUserData(chatId); // Cek userData DI SINI
+        if (!userData) {
+            bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
+            return; // Penting: keluar dari fungsi jika tidak ada wallet
+        }
+        let userSettings = userData.settings || DEFAULT_USER_SETTINGS; // Ambil setting yang sudah ada
+
         const settingKey = data.replace('set_', '');
         userStates.set(chatId, { step: `awaiting_input_${settingKey}`, data: { settingKey } });
         let promptMessage = '';
@@ -198,11 +211,27 @@ bot.on('callback_query', async (query) => {
         }
         bot.sendMessage(chatId, promptMessage);
     } else if (data === 'toggle_multi_buy') {
+        // Pengecekan userData diperlukan di sini
+        const userData = await storage.getUserData(chatId); // Cek userData DI SINI
+        if (!userData) {
+            bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
+            return; // Penting: keluar dari fungsi jika tidak ada wallet
+        }
+        let userSettings = userData.settings || DEFAULT_USER_SETTINGS;
+
         const newStatus = !userSettings.enableMultiBuy;
         await storage.updateUserSettings(chatId, { enableMultiBuy: newStatus });
         bot.sendMessage(chatId, `Multi Buy berhasil diubah menjadi: ${newStatus ? 'Aktif' : 'Nonaktif'}.`);
         await bot.sendMessage(chatId, 'Gunakan /settings untuk melihat pengaturan terbaru.');
     } else if (data === 'toggle_trailing_stop') {
+        // Pengecekan userData diperlukan di sini
+        const userData = await storage.getUserData(chatId); // Cek userData DI SINI
+        if (!userData) {
+            bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
+            return; // Penting: keluar dari fungsi jika tidak ada wallet
+        }
+        let userSettings = userData.settings || DEFAULT_USER_SETTINGS;
+
         const newStatus = !userSettings.enableTrailingStop;
         await storage.updateUserSettings(chatId, { enableTrailingStop: newStatus });
         bot.sendMessage(chatId, `Trailing Stop berhasil diubah menjadi: ${newStatus ? 'Aktif' : 'Nonaktif'}.`);
