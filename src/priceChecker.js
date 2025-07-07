@@ -1,12 +1,8 @@
 // src/priceChecker.js
-const fetch = require('node-fetch').default; // ← note the ".default"
+const fetch = require('node-fetch').default;
 const config = require('./config');
 const { info, error } = require('./logger');
 
-/**
- * Fetch price data for a given mint address via Coinvera HTTP API.
- * Returns: { priceInSol: Number, priceInUsd: Number } or null on failure.
- */
 async function getPriceOnChain(mint) {
   const url = `https://api.coinvera.io/api/v1/price?ca=${mint}`;
   try {
@@ -17,21 +13,26 @@ async function getPriceOnChain(mint) {
         'x-api-key': config.COINVERA_API
       }
     });
+    // Selalu coba parse JSON untuk mendapatkan detail error, bahkan jika !res.ok
+    const data = await res.json(); // <-- PENTING: Pindahkan ini ke atas
+
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      let errorMessage = `HTTP ${res.status}: ${res.statusText}`;
+      if (data && data.error && data.message) {
+          errorMessage = `Coinvera API Error: ${data.code} - ${data.message} (HTTP ${res.status})`;
+      }
+      throw new Error(errorMessage);
     }
-    const data = await res.json();
-    return {
-      priceInSol: data.priceInSol,
-      priceInUsd: data.priceInUsd
-    };
+
+    // Jika berhasil, kembalikan SELURUH data yang diterima
+    return data; // <-- PENTING: Kembalikan seluruh objek data
+
   } catch (err) {
     error(`[priceChecker] Failed to fetch price for ${mint}: ${err.message}`);
     return null;
   }
 }
 
-/** Sleep for ms milliseconds. */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
