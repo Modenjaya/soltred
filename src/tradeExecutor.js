@@ -1,5 +1,5 @@
 // src/tradeExecutor.js
-const { Connection, Keypair, VersionedTransaction, SystemProgram, LAMPORTS_PER_SOL, TransactionMessage } = require('@solana/web3.js');
+const { Connection, Keypair, VersionedTransaction, SystemProgram, LAMPORTS_PER_SOL, TransactionMessage, PublicKey } = require('@solana/web3.js'); // <-- Tambahkan PublicKey di sini
 const fetch = require('node-fetch').default;
 const config = require('./config');
 const { info, error, warn } = require('./logger');
