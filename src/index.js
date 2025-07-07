@@ -3,11 +3,19 @@ require('dotenv').config(); // Load environment variables from .env
 
 const TelegramBot = require('node-telegram-bot-api');
 const { Keypair, PublicKey } = require('@solana/web3.js');
-const bs58 = require('bs58');
+
+// Import bs58 safely
+let bs58;
+try {
+  const imported = require('bs58');
+  bs58 = imported.default ? imported.default : imported;
+} catch (err) {
+  bs58 = require('bs58');
+}
 
 const config = require('./config');
 const { info, error } = require('./logger');
-const storage = require('./storage'); // Menggunakan storage baru berbasis SQLite
+const storage = require('./storage');
 const { getPriceOnChain } = require('./priceChecker');
 const { buyToken, sellToken } = require('./tradeExecutor');
 
@@ -140,12 +148,9 @@ bot.on('callback_query', async (query) => {
     const data = query.data;
     await bot.answerCallbackQuery(query.id); // dismiss the loading state on the button
 
-    // Pindahkan pengecekan userData ke dalam blok yang relevan
-    // Artinya, logika create_wallet dan import_wallet TIDAK PERLU cek userData di awal
-
+    // Logika create_wallet dan import_wallet tidak perlu cek userData di awal
     if (data === 'create_wallet') {
         const newWallet = generateWallet();
-        // Ambil pengaturan yang ada atau default jika baru
         const userSettings = await storage.getUserSettings(chatId) || DEFAULT_USER_SETTINGS;
         await storage.saveUserData(chatId, newWallet.publicKey, newWallet.privateKey, userSettings);
         bot.sendMessage(
@@ -165,11 +170,11 @@ bot.on('callback_query', async (query) => {
             `\n\n*PERINGATAN: Mengimpor Private Key sangat berisiko. Lakukan dengan risiko Anda sendiri!*`
         );
     } else if (data.startsWith('buy_token_')) {
-        // Pengecekan userData diperlukan di sini karena ini adalah aksi yang memerlukan wallet
-        const userData = await storage.getUserData(chatId); // Cek userData DI SINI
+        // Pengecekan userData diperlukan di sini
+        const userData = await storage.getUserData(chatId);
         if (!userData) {
             bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
-            return; // Penting: keluar dari fungsi jika tidak ada wallet
+            return;
         }
 
         const [, mint, solAmountStr] = data.split('_');
@@ -191,13 +196,13 @@ bot.on('callback_query', async (query) => {
     } 
     // --- Setting Buttons ---
     else if (data.startsWith('set_')) {
-        // Pengecekan userData diperlukan di sini karena ini adalah aksi yang memerlukan wallet
-        const userData = await storage.getUserData(chatId); // Cek userData DI SINI
+        // Pengecekan userData diperlukan di sini
+        const userData = await storage.getUserData(chatId);
         if (!userData) {
             bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
-            return; // Penting: keluar dari fungsi jika tidak ada wallet
+            return;
         }
-        let userSettings = userData.settings || DEFAULT_USER_SETTINGS; // Ambil setting yang sudah ada
+        let userSettings = userData.settings || DEFAULT_USER_SETTINGS;
 
         const settingKey = data.replace('set_', '');
         userStates.set(chatId, { step: `awaiting_input_${settingKey}`, data: { settingKey } });
@@ -212,10 +217,10 @@ bot.on('callback_query', async (query) => {
         bot.sendMessage(chatId, promptMessage);
     } else if (data === 'toggle_multi_buy') {
         // Pengecekan userData diperlukan di sini
-        const userData = await storage.getUserData(chatId); // Cek userData DI SINI
+        const userData = await storage.getUserData(chatId);
         if (!userData) {
             bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
-            return; // Penting: keluar dari fungsi jika tidak ada wallet
+            return;
         }
         let userSettings = userData.settings || DEFAULT_USER_SETTINGS;
 
@@ -225,10 +230,10 @@ bot.on('callback_query', async (query) => {
         await bot.sendMessage(chatId, 'Gunakan /settings untuk melihat pengaturan terbaru.');
     } else if (data === 'toggle_trailing_stop') {
         // Pengecekan userData diperlukan di sini
-        const userData = await storage.getUserData(chatId); // Cek userData DI SINI
+        const userData = await storage.getUserData(chatId);
         if (!userData) {
             bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
-            return; // Penting: keluar dari fungsi jika tidak ada wallet
+            return;
         }
         let userSettings = userData.settings || DEFAULT_USER_SETTINGS;
 
@@ -342,10 +347,15 @@ bot.on('message', async (msg) => {
         }
 
         if (isValid) {
-            await storage.updateUserSettings(chatId, { [settingKey]: valueToSave });
-            bot.sendMessage(chatId, `${settingKey.replace(/_/g, ' ')} berhasil diperbarui menjadi: \`${valueToSave}\`.`);
-            userStates.delete(chatId); // Clear state
-            await bot.sendMessage(chatId, 'Gunakan /settings untuk melihat pengaturan terbaru.');
+            try {
+                await storage.updateUserSettings(chatId, { [settingKey]: valueToSave });
+                bot.sendMessage(chatId, `${settingKey.replace(/_/g, ' ')} berhasil diperbarui menjadi: \`${valueToSave}\`.`);
+                userStates.delete(chatId); // Clear state
+                await bot.sendMessage(chatId, 'Gunakan /settings untuk melihat pengaturan terbaru.');
+            } catch (storageErr) {
+                 error(`Error updating user settings for ${chatId}: ${storageErr.message}`);
+                 bot.sendMessage(chatId, `❌ Gagal memperbarui pengaturan: ${storageErr.message}.`);
+            }
         } else {
             bot.sendMessage(chatId, `❌ Gagal memperbarui ${settingKey.replace(/_/g, ' ')}: ${errorMessage}\nSilakan coba lagi.`);
         }
