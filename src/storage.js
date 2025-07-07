@@ -4,9 +4,18 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const getTimestamp = require('../utils/getTimestamp');
 const { info, error } = require('./logger');
-const config = require('./config'); // Import config untuk DATABASE_PATH
+const config = require('./config');
 
-const positionsFilePath = path.join(__dirname, '../data/positions.json'); // Tetap untuk posisi
+// Import bs58 safely
+let bs58;
+try {
+  const imported = require('bs58');
+  bs58 = imported.default ? imported.default : imported;
+} catch (err) {
+  bs58 = require('bs58');
+}
+
+const positionsFilePath = path.join(__dirname, '../data/positions.json');
 let db; // Deklarasi variabel database
 
 /**
@@ -84,7 +93,6 @@ function writePositionsData(data) {
   fs.writeFileSync(positionsFilePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
-
 // --- User Settings and Wallet (SQLite) ---
 
 /**
@@ -132,7 +140,7 @@ async function saveUserData(telegramId, publicKey, privateKey, settings) {
     db.run(
       `INSERT OR REPLACE INTO user_settings (telegram_id, public_key, private_key, settings_json) VALUES (?, ?, ?, ?)`,
       [telegramId, publicKey, privateKey, settingsJson],
-      function (err) { // Use function() for 'this.lastID'
+      function (err) {
         if (err) {
           error(`[Storage] Error saving user data for ${telegramId}: ${err.message}`);
           return reject(err);
@@ -176,7 +184,6 @@ async function updateUserSettings(telegramId, updates) {
 
     return saveUserData(telegramId, publicKey, privateKey, newSettings);
 }
-
 
 // --- Existing Positions Management (JSON file remains) ---
 
@@ -261,8 +268,8 @@ module.exports = {
   getActivePositions,
   updatePosition,
   findExactActiveByMint,
-  getUserData,        // New: Get all user data (wallet + settings)
-  saveUserData,       // New: Save all user data
-  getUserSettings,    // New: Get only user settings
-  updateUserSettings, // New: Update specific user settings
+  getUserData,
+  saveUserData,
+  getUserSettings,
+  updateUserSettings,
 };
