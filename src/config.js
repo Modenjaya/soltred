@@ -51,7 +51,4 @@ if (!validBotModes.includes(config.BOT_MODE)) {
   exit(1);
 }
 
-// Catatan: Validasi untuk TRADE_TYPE, BUY_AMOUNT, dll, akan dilakukan saat user mengatur di bot
-// atau saat memuat setting dari DB.
-
 module.exports = config;
