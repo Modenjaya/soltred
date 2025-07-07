@@ -130,7 +130,6 @@ bot.onText(/\/settings/, async (msg) => {
                 [{ text: 'Ubah Copy Wallet', callback_data: 'set_copy_wallet' }],
                 [{ text: 'Toggle Multi Buy', callback_data: 'toggle_multi_buy' }],
                 [{ text: 'Toggle Trailing Stop', callback_data: 'toggle_trailing_stop' }],
-                // Tambahkan tombol untuk TSL distance dan activation jika TSL diaktifkan
                 ...(userSettings.enableTrailingStop ? [
                     [{ text: 'Ubah TSL Distance', callback_data: 'set_tsl_distance' }],
                     [{ text: 'Ubah TSL Activation', callback_data: 'set_tsl_activation' }]
@@ -146,7 +145,7 @@ bot.onText(/\/settings/, async (msg) => {
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const data = query.data;
-    await bot.answerCallbackQuery(query.id); // dismiss the loading state on the button
+    await bot.answerCallbackQuery(query.id);
 
     // Logika create_wallet dan import_wallet tidak perlu cek userData di awal
     if (data === 'create_wallet') {
@@ -268,9 +267,10 @@ bot.on('message', async (msg) => {
             bot.sendMessage(
                 chatId,
                 `Wallet Anda berhasil diimpor!\n\n` +
-                `Public Key: \`${userKeypair.publicKey.toBase58()}\`\n\n` +
-                `*PENTING: Private Key Anda sekarang disimpan di bot ini. Ini berisiko!*` +
-                `\n\nAnda sekarang bisa paste alamat kontrak token untuk cek data atau swap. Gunakan /settings untuk konfigurasi trade.`,
+                `Public Key: \`${userKeypair.publicKey.toBase58()}\`\n` +
+                `Private Key (simpan baik-baik!): \`${text}\`\n\n` // Tampilkan Private Key yang diimpor
+                +`*PENTING: Private Key Anda sekarang disimpan di bot ini. Ini berisiko!*`
+                +`\n\nAnda sekarang bisa paste alamat kontrak token untuk cek data atau swap. Gunakan /settings untuk konfigurasi trade.`,
                 { parse_mode: 'Markdown' }
             );
         } catch (e) {
@@ -370,19 +370,23 @@ bot.on('message', async (msg) => {
         try {
             const priceData = await getPriceOnChain(mintAddress);
 
+            // Perbaikan pengecekan priceData
             if (priceData && priceData.priceInSol !== undefined && priceData.priceInUsd !== undefined) {
                 let message = `**Data Token ${mintAddress}:**\n`;
                 message += `Harga per token (SOL): ${priceData.priceInSol.toFixed(9)}\n`;
                 message += `Harga per token (USD): $${priceData.priceInUsd.toFixed(9)}\n`;
-                message += `Dex Utama: ${priceData.dex || 'N/A'}\n`; // properti dex, volume24h, marketCap mungkin tidak selalu ada
+                // Properti ini mungkin tidak selalu ada, gunakan fallback 'N/A'
+                message += `Dex Utama: ${priceData.dex || 'N/A'}\n`;
                 message += `Volume 24h: ${priceData.volume24h ? priceData.volume24h.toFixed(2) : 'N/A'}\n`;
                 message += `Market Cap: ${priceData.marketCap ? priceData.marketCap.toFixed(2) : 'N/A'}\n\n`;
                 message += `_Data ini berasal dari Coinvera API. Untuk token non-Pump.fun, data mungkin tidak tersedia._`;
 
+                // Get user's buy amount setting
                 const userData = await storage.getUserData(chatId);
                 const userSettings = userData ? userData.settings : DEFAULT_USER_SETTINGS;
                 const buyAmountSol = userSettings.buyAmount || DEFAULT_USER_SETTINGS.buyAmount; 
 
+                // Add Buy button
                 bot.sendMessage(chatId, message, {
                     parse_mode: 'Markdown',
                     reply_markup: {
@@ -405,24 +409,6 @@ bot.on('message', async (msg) => {
             bot.sendMessage(chatId, `Terjadi kesalahan saat mengambil data token: ${e.message}`);
         }
     } else {
-        bot.sendMessage(chatId, 'Mohon masukkan alamat kontrak token yang valid atau pilih perintah.');
-    }
-});
-
-            } else {
-                bot.sendMessage(
-                    chatId,
-                    `❌ Gagal mendapatkan data harga untuk token ini. ` +
-                    `Mungkin token ini tidak didukung oleh Coinvera API (terutama jika bukan token Pump.fun), ` +
-                    `atau ada masalah dengan API key Anda.`
-                );
-            }
-        } catch (e) {
-            error(`Error fetching price for ${mintAddress}: ${e.message}`);
-            bot.sendMessage(chatId, `Terjadi kesalahan saat mengambil data token: ${e.message}`);
-        }
-    } else {
-        // If it's not a CA and not a command, just echo or ignore
         bot.sendMessage(chatId, 'Mohon masukkan alamat kontrak token yang valid atau pilih perintah.');
     }
 });
