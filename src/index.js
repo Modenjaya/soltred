@@ -363,37 +363,51 @@ bot.on('message', async (msg) => {
     }
 
     // --- Assume user pasted a Contract Address (CA) ---
-    if (text.length >= 32 && text.length <= 44 && !text.includes(' ')) { // Simple check for Solana address length
+    if (text.length >= 32 && text.length <= 44 && !text.includes(' ')) {
         const mintAddress = text;
         bot.sendMessage(chatId, `Mencari data untuk token CA: \`${mintAddress}\`...`, { parse_mode: 'Markdown' });
 
         try {
             const priceData = await getPriceOnChain(mintAddress);
 
-            if (priceData) {
+            if (priceData && priceData.priceInSol !== undefined && priceData.priceInUsd !== undefined) {
                 let message = `**Data Token ${mintAddress}:**\n`;
-                message += `Harga per token (SOL): ${priceData.priceInSol ? priceData.priceInSol.toFixed(9) : 'N/A'}\n`;
-                message += `Harga per token (USD): $${priceData.priceInUsd ? priceData.priceInUsd.toFixed(9) : 'N/A'}\n`;
-                message += `Dex Utama: ${priceData.dex || 'N/A'}\n`;
+                message += `Harga per token (SOL): ${priceData.priceInSol.toFixed(9)}\n`;
+                message += `Harga per token (USD): $${priceData.priceInUsd.toFixed(9)}\n`;
+                message += `Dex Utama: ${priceData.dex || 'N/A'}\n`; // properti dex, volume24h, marketCap mungkin tidak selalu ada
                 message += `Volume 24h: ${priceData.volume24h ? priceData.volume24h.toFixed(2) : 'N/A'}\n`;
                 message += `Market Cap: ${priceData.marketCap ? priceData.marketCap.toFixed(2) : 'N/A'}\n\n`;
                 message += `_Data ini berasal dari Coinvera API. Untuk token non-Pump.fun, data mungkin tidak tersedia._`;
 
-                // Get user's buy amount setting
                 const userData = await storage.getUserData(chatId);
                 const userSettings = userData ? userData.settings : DEFAULT_USER_SETTINGS;
                 const buyAmountSol = userSettings.buyAmount || DEFAULT_USER_SETTINGS.buyAmount; 
 
-                // Add Buy button
                 bot.sendMessage(chatId, message, {
                     parse_mode: 'Markdown',
                     reply_markup: {
                         inline_keyboard: [
                             [{ text: `💰 Beli ${buyAmountSol} SOL`, callback_data: `buy_token_${mintAddress}_${buyAmountSol}` }],
-                            // Anda bisa menambahkan tombol lain seperti 'Jual', 'Lihat di Solscan', dll.
                         ],
                     },
                 });
+
+            } else {
+                bot.sendMessage(
+                    chatId,
+                    `❌ Gagal mendapatkan data harga untuk token ini. ` +
+                    `Mungkin token ini tidak didukung oleh Coinvera API (terutama jika bukan token Pump.fun), ` +
+                    `ada masalah dengan API key Anda, atau data yang dikembalikan tidak lengkap.`
+                );
+            }
+        } catch (e) {
+            error(`Error fetching price for ${mintAddress}: ${e.message}`);
+            bot.sendMessage(chatId, `Terjadi kesalahan saat mengambil data token: ${e.message}`);
+        }
+    } else {
+        bot.sendMessage(chatId, 'Mohon masukkan alamat kontrak token yang valid atau pilih perintah.');
+    }
+});
 
             } else {
                 bot.sendMessage(
