@@ -2,7 +2,7 @@
 require('dotenv').config(); // Load environment variables from .env
 
 const TelegramBot = require('node-telegram-bot-api');
-const { Keypair, PublicKey } = require('@solana/web3.js');
+const { Keypair, PublicKey, Connection, LAMPORTS_PER_SOL } = require('@solana/web3.js'); // Tambah Connection dan LAMPORTS_PER_SOL
 
 // Import bs58 safely
 let bs58;
@@ -14,10 +14,10 @@ try {
 }
 
 const config = require('./config');
-const { info, error } = require('./logger');
+const { info, error, warn } = require('./logger'); // Tambah warn
 const storage = require('./storage');
 const { getPriceOnChain } = require('./priceChecker');
-const { buyToken, sellToken } = require('./tradeExecutor');
+const { buyToken, sellToken } = require('./tradeExecutor'); // sellToken juga diimpor
 
 // Inisialisasi Bot Telegram
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -56,7 +56,7 @@ info('Bot Telegram dimulai.');
 // --- HELPER FUNCTIONS ---
 
 function formatSolAmount(lamports) {
-  return (lamports / 1_000_000_000).toFixed(4);
+  return (lamports / LAMPORTS_PER_SOL).toFixed(4); // Gunakan LAMPORTS_PER_SOL dari web3.js
 }
 
 function generateWallet() {
@@ -82,7 +82,7 @@ bot.onText(/\/start/, async (msg) => {
     bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
   } else {
     welcomeMessage += `Untuk memulai, Anda perlu membuat atau mengimpor wallet.\n`;
-    welcomeMessage += `*PENTING: Private Key Anda akan disimpan di bot ini (terenkripsi).* Ini berisiko. Lakukan dengan risiko Anda sendiri.\n`;
+    welcomeMessage += `*PENTING: Private Key Anda akan disimpan di bot ini.* Ini berisiko. Lakukan dengan risiko Anda sendiri.\n`; // Hapus (terenkripsi) untuk kejujuran
     welcomeMessage += `Pilih opsi di bawah ini:`;
     bot.sendMessage(chatId, welcomeMessage, {
       parse_mode: 'Markdown',
@@ -147,7 +147,6 @@ bot.on('callback_query', async (query) => {
     const data = query.data;
     await bot.answerCallbackQuery(query.id);
 
-    // Logika create_wallet dan import_wallet tidak perlu cek userData di awal
     if (data === 'create_wallet') {
         const newWallet = generateWallet();
         const userSettings = await storage.getUserSettings(chatId) || DEFAULT_USER_SETTINGS;
@@ -168,34 +167,58 @@ bot.on('callback_query', async (query) => {
             `Silakan paste Private Key (base58-encoded) wallet Anda di sini. ` +
             `\n\n*PERINGATAN: Mengimpor Private Key sangat berisiko. Lakukan dengan risiko Anda sendiri!*`
         );
-    } else if (data.startsWith('buy_token_')) {
-        // Pengecekan userData diperlukan di sini
+    } else if (data.startsWith('buy_token_') && !data.endsWith('_X_custom')) { // Handles fixed amount buy buttons
         const userData = await storage.getUserData(chatId);
-        if (!userData) {
-            bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
+        if (!userData || !userData.publicKey || !userData.privateKey) {
+            bot.sendMessage(chatId, 'Anda belum memiliki wallet atau wallet Anda tidak lengkap. Silakan /start untuk membuatnya.');
             return;
         }
 
-        const [, mint, solAmountStr] = data.split('_');
+        const parts = data.split('_');
+        if (parts.length < 4) {
+            error(`Invalid callback_data for fixed buy_token: ${data}`);
+            bot.sendMessage(chatId, 'Terjadi kesalahan internal pada tombol beli. Mohon coba lagi.');
+            return;
+        }
+        const mint = parts[2];
+        const solAmountStr = parts[3];
         const solAmount = parseFloat(solAmountStr);
 
-        userStates.set(chatId, { 
-            step: 'confirm_private_key_for_buy', 
-            data: { mint, solAmount } 
-        });
+        if (isNaN(solAmount) || solAmount <= 0) {
+            bot.sendMessage(chatId, 'Jumlah beli tidak valid. Mohon coba lagi atau atur ulang /settings.');
+            return;
+        }
+        
+        const userKeypair = Keypair.fromSecretKey(bs58.decode(userData.privateKey));
+        const userSettings = userData.settings || DEFAULT_USER_SETTINGS;
 
-        bot.sendMessage(
-            chatId,
-            `Untuk membeli ${solAmount} SOL dari token \`${mint}\`, ` +
-            `silakan paste Private Key (base58-encoded) wallet Anda di sini untuk konfirmasi.\n\n` +
-            `*PERINGATAN: Private Key Anda akan digunakan untuk menandatangani transaksi ini. ` +
-            `Jangan berikan kepada siapapun yang tidak Anda percaya!*`,
-            { parse_mode: 'Markdown' }
-        );
-    } 
+        await bot.sendMessage(chatId, `Mencoba membeli ${solAmount} SOL dari token \`${mint}\` menggunakan wallet Anda...`);
+        
+        try {
+            const signature = await buyToken(
+                { mint, amountSol: solAmount }, 
+                userSettings, 
+                userKeypair
+            );
+            bot.sendMessage(chatId, `✅ Berhasil membeli! Transaksi: https://solscan.io/tx/${signature}`);
+        } catch (e) {
+            error(`Error buying token: ${e.message}`);
+            bot.sendMessage(chatId, `❌ Gagal membeli token: ${e.message}.`);
+        }
+    } else if (data.startsWith('buy_token_') && data.endsWith('_X_custom')) { // Untuk Buy X SOL
+        const mintAddress = data.split('_')[2];
+        userStates.set(chatId, { step: 'awaiting_custom_buy_amount', data: { mint: mintAddress } });
+        bot.sendMessage(chatId, `Masukkan jumlah SOL yang ingin Anda beli untuk token \`${mintAddress}\` (contoh: 0.05):`);
+    } else if (data === 'back_to_main') {
+        bot.sendMessage(chatId, 'Silakan masukkan alamat kontrak token lain atau gunakan perintah lain.');
+    } else if (data.startsWith('refresh_token_')) {
+        const mintAddress = data.split('_')[2];
+        bot.sendMessage(chatId, `Mencari data terbaru untuk token CA: \`${mintAddress}\`...`, { parse_mode: 'Markdown' });
+        // Panggil kembali logika yang sama seperti saat paste CA
+        bot.emit('message', { chat: { id: chatId }, text: mintAddress });
+    }
     // --- Setting Buttons ---
     else if (data.startsWith('set_')) {
-        // Pengecekan userData diperlukan di sini
         const userData = await storage.getUserData(chatId);
         if (!userData) {
             bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
@@ -215,7 +238,6 @@ bot.on('callback_query', async (query) => {
         }
         bot.sendMessage(chatId, promptMessage);
     } else if (data === 'toggle_multi_buy') {
-        // Pengecekan userData diperlukan di sini
         const userData = await storage.getUserData(chatId);
         if (!userData) {
             bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
@@ -228,7 +250,6 @@ bot.on('callback_query', async (query) => {
         bot.sendMessage(chatId, `Multi Buy berhasil diubah menjadi: ${newStatus ? 'Aktif' : 'Nonaktif'}.`);
         await bot.sendMessage(chatId, 'Gunakan /settings untuk melihat pengaturan terbaru.');
     } else if (data === 'toggle_trailing_stop') {
-        // Pengecekan userData diperlukan di sini
         const userData = await storage.getUserData(chatId);
         if (!userData) {
             bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
@@ -268,9 +289,9 @@ bot.on('message', async (msg) => {
                 chatId,
                 `Wallet Anda berhasil diimpor!\n\n` +
                 `Public Key: \`${userKeypair.publicKey.toBase58()}\`\n` +
-                `Private Key (simpan baik-baik!): \`${text}\`\n\n` // Tampilkan Private Key yang diimpor
-                +`*PENTING: Private Key Anda sekarang disimpan di bot ini. Ini berisiko!*`
-                +`\n\nAnda sekarang bisa paste alamat kontrak token untuk cek data atau swap. Gunakan /settings untuk konfigurasi trade.`,
+                `Private Key (simpan baik-baik!): \`${text}\`\n\n` + // Tampilkan Private Key yang diimpor
+                `*PENTING: Private Key Anda sekarang disimpan di bot ini. Ini berisiko!*` +
+                `\n\nAnda sekarang bisa paste alamat kontrak token untuk cek data atau swap. Gunakan /settings untuk konfigurasi trade.`,
                 { parse_mode: 'Markdown' }
             );
         } catch (e) {
@@ -280,36 +301,40 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // --- Handle awaiting private key for transaction confirmation ---
-    if (currentState && currentState.step === 'confirm_private_key_for_buy') {
-        const { mint, solAmount } = currentState.data;
-        try {
-            const userKeypair = Keypair.fromSecretKey(bs58.decode(text));
+    // --- Handle custom buy amount input ---
+    if (currentState && currentState.step === 'awaiting_custom_buy_amount') {
+        const { mint } = currentState.data;
+        const customAmount = parseFloat(text);
+
+        if (isNaN(customAmount) || customAmount <= 0) {
+            bot.sendMessage(chatId, 'Jumlah SOL yang dimasukkan tidak valid. Mohon masukkan angka positif (contoh: 0.05).');
+            return;
+        }
+
+        const userData = await storage.getUserData(chatId);
+        if (!userData || !userData.privateKey) {
+            bot.sendMessage(chatId, 'Anda belum memiliki wallet. Silakan /start untuk membuatnya.');
             userStates.delete(chatId); // Clear state
+            return;
+        }
 
-            // Pastikan private key yang dimasukkan sesuai dengan yang tersimpan
-            const userData = await storage.getUserData(chatId);
-            if (!userData || userData.privateKey !== text) {
-                bot.sendMessage(chatId, 'Private Key yang dimasukkan tidak cocok dengan wallet Anda yang terdaftar. Transaksi dibatalkan.');
-                return;
-            }
+        const userKeypair = Keypair.fromSecretKey(bs58.decode(userData.privateKey));
+        const userSettings = userData.settings || DEFAULT_USER_SETTINGS;
 
-            // Ambil pengaturan trade spesifik user
-            const userSettings = userData.settings || DEFAULT_USER_SETTINGS;
-
-            await bot.sendMessage(chatId, `Mencoba membeli ${solAmount} SOL dari token \`${mint}\` menggunakan wallet Anda...`);
-            
-            // Panggil buyToken dengan Keypair pengguna dan setting spesifik user
+        await bot.sendMessage(chatId, `Mencoba membeli ${customAmount} SOL dari token \`${mint}\` menggunakan wallet Anda...`);
+        
+        try {
             const signature = await buyToken(
-                { mint, amountSol: solAmount }, 
-                userSettings, // Kirim userSettings ke tradeExecutor
+                { mint, amountSol: customAmount }, 
+                userSettings, 
                 userKeypair
             );
-
             bot.sendMessage(chatId, `✅ Berhasil membeli! Transaksi: https://solscan.io/tx/${signature}`);
         } catch (e) {
-            error(`Error buying token for ${chatId}: ${e.message}`);
-            bot.sendMessage(chatId, `❌ Gagal membeli token: ${e.message}. Pastikan Private Key valid dan Anda memiliki cukup SOL.`);
+            error(`Error buying token: ${e.message}`);
+            bot.sendMessage(chatId, `❌ Gagal membeli token: ${e.message}.`);
+        } finally {
+            userStates.delete(chatId); // Clear state after attempt
         }
         return;
     }
@@ -321,7 +346,6 @@ bot.on('message', async (msg) => {
         let isValid = true;
         let errorMessage = '';
 
-        // Validasi input berdasarkan settingKey
         if (['buy_amount', 'take_profit', 'stop_loss', 'slippage', 'jito_tip', 'trailing_stop_distance', 'trailing_stop_activation'].includes(settingKey)) {
             const numValue = parseFloat(text);
             if (isNaN(numValue) || numValue < 0) {
@@ -368,30 +392,66 @@ bot.on('message', async (msg) => {
         bot.sendMessage(chatId, `Mencari data untuk token CA: \`${mintAddress}\`...`, { parse_mode: 'Markdown' });
 
         try {
-            const priceData = await getPriceOnChain(mintAddress);
+            const priceData = await getPriceOnChain(mintAddress); // priceData sekarang seharusnya sudah angka
+            const userData = await storage.getUserData(chatId);
+            const userSettings = userData ? userData.settings : DEFAULT_USER_SETTINGS;
+            const userWalletPublicKey = userData ? userData.publicKey : null;
 
-            // Perbaikan pengecekan priceData
-            if (priceData && priceData.priceInSol !== undefined && priceData.priceInUsd !== undefined) {
-                let message = `**Data Token ${mintAddress}:**\n`;
-                message += `Harga per token (SOL): ${priceData.priceInSol.toFixed(9)}\n`;
-                message += `Harga per token (USD): $${priceData.priceInUsd.toFixed(9)}\n`;
-                // Properti ini mungkin tidak selalu ada, gunakan fallback 'N/A'
-                message += `Dex Utama: ${priceData.dex || 'N/A'}\n`;
-                message += `Volume 24h: ${priceData.volume24h ? priceData.volume24h.toFixed(2) : 'N/A'}\n`;
-                message += `Market Cap: ${priceData.marketCap ? priceData.marketCap.toFixed(2) : 'N/A'}\n\n`;
-                message += `_Data ini berasal dari Coinvera API. Untuk token non-Pump.fun, data mungkin tidak tersedia._`;
+            let userSolBalance = '0.0000';
+            if (userWalletPublicKey) {
+                try {
+                    const connection = new Connection(config.SOLANA_RPC, 'confirmed');
+                    const balanceLamports = await connection.getBalance(new PublicKey(userWalletPublicKey));
+                    userSolBalance = (balanceLamports / LAMPORTS_PER_SOL).toFixed(4); // Gunakan LAMPORTS_PER_SOL
+                } catch (balanceErr) {
+                    warn(`[Bot] Gagal mendapatkan balance SOL untuk ${userWalletPublicKey}: ${balanceErr.message}`);
+                }
+            }
+            
+            // --- UI/DISPLAY LOGIC ---
+            // priceData.priceInSol dan priceData.priceInUsd seharusnya sudah Number dari priceChecker.js
+            if (priceData && typeof priceData.priceInSol === 'number' && typeof priceData.priceInUsd === 'number') {
+                const tokenName = priceData.symbol || 'Token'; 
+                const tokenAddressShort = mintAddress.substring(0, 4) + '...' + mintAddress.substring(mintAddress.length - 4);
+                const liq = priceData.volume24h ? (parseFloat(priceData.volume24h) / 1000).toFixed(1) : 'N/A';
+                const mc = priceData.marketCap ? (parseFloat(priceData.marketCap) / 1000).toFixed(1) : 'N/A';
+                // Asumsi Coinvera API mengembalikan properti 'renounced' (boolean)
+                const renouncedStatus = priceData.renounced === true ? '✅' : (priceData.renounced === false ? '❌' : '❓'); // Handle null/undefined juga
 
-                // Get user's buy amount setting
-                const userData = await storage.getUserData(chatId);
-                const userSettings = userData ? userData.settings : DEFAULT_USER_SETTINGS;
-                const buyAmountSol = userSettings.buyAmount || DEFAULT_USER_SETTINGS.buyAmount; 
+                let message = `*${tokenName}* (${tokenAddressShort})\n`;
+                message += `[Buy ${tokenName}](https://dexscreener.com/solana/${mintAddress})\n`; 
+                message += `Share token with your Reflink\n\n`; 
 
-                // Add Buy button
+                message += `Balance: ${userSolBalance} SOL — W1 ✏️\n`; 
+                message += `Price: $${priceData.priceInUsd.toFixed(5)} — LIQ: $${liq}K — MC: $${mc}K\n`; 
+                message += `Renounced ${renouncedStatus}\n\n`; 
+
+                const progress = parseFloat(priceData.bondingCurveProgress);
+                if (!isNaN(progress)) {
+                    message += `💊 Bonding Curve Progression: ${progress.toFixed(2)}%\n`;
+                    const filledBlocks = Math.round(progress / 10); 
+                    const emptyBlocks = 10 - filledBlocks;
+                    message += `[${'█'.repeat(filledBlocks)}${'░'.repeat(emptyBlocks)}]\n\n`;
+                } else {
+                    message += `Bonding Curve Progression: N/A\n\n`;
+                }
+                
+                // Estimasi token dan USD untuk buyAmount default user
+                const buyAmountForDisplay = userSettings.buyAmount || DEFAULT_USER_SETTINGS.buyAmount;
+                const estimatedTokens = priceData.priceInSol > 0 ? (buyAmountForDisplay / priceData.priceInSol).toFixed(2) : 'N/A';
+                const estimatedUsd = priceData.priceInUsd > 0 && priceData.priceInSol > 0 ? (buyAmountForDisplay * (priceData.priceInUsd / priceData.priceInSol)).toFixed(2) : 'N/A';
+
+                message += `${buyAmountForDisplay} SOL ↔️ ${estimatedTokens} ${tokenName} ($${estimatedUsd})\n`;
+                message += `Price Impact: N/A\n`; // Masih placeholder
+
                 bot.sendMessage(chatId, message, {
                     parse_mode: 'Markdown',
                     reply_markup: {
                         inline_keyboard: [
-                            [{ text: `💰 Beli ${buyAmountSol} SOL`, callback_data: `buy_token_${mintAddress}_${buyAmountSol}` }],
+                            [{ text: '← Back', callback_data: 'back_to_main' }, { text: '↻ Refresh', callback_data: `refresh_token_${mintAddress}` }],
+                            [{ text: 'Buy 0.5 SOL', callback_data: `buy_token_${mintAddress}_0.5` }],
+                            [{ text: 'Buy 1 SOL', callback_data: `buy_token_${mintAddress}_1` }],
+                            [{ text: 'Buy X SOL ✏️', callback_data: `buy_token_${mintAddress}_X_custom` }]
                         ],
                     },
                 });
@@ -399,9 +459,9 @@ bot.on('message', async (msg) => {
             } else {
                 bot.sendMessage(
                     chatId,
-                    `❌ Gagal mendapatkan data harga untuk token ini. ` +
+                    `❌ Gagal mendapatkan data harga yang valid untuk token ini. ` +
                     `Mungkin token ini tidak didukung oleh Coinvera API (terutama jika bukan token Pump.fun), ` +
-                    `ada masalah dengan API key Anda, atau data yang dikembalikan tidak lengkap.`
+                    `ada masalah dengan API key Anda, atau format data tidak terduga.`
                 );
             }
         } catch (e) {
