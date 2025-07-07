@@ -1,9 +1,17 @@
 // src/tradeExecutor.js
-const { Connection, Keypair, VersionedTransaction, SystemProgram, LAMPORTS_PER_SOL } = require('@solana/web3.js');
-const bs58 = require('bs58');
+const { Connection, Keypair, VersionedTransaction, SystemProgram, LAMPORTS_PER_SOL, TransactionMessage } = require('@solana/web3.js');
 const fetch = require('node-fetch').default;
-const config = require('./config'); // Hanya untuk variabel global seperti SOLANA_RPC, JITO_ENGINE
-const { info, error } = require('./logger');
+const config = require('./config');
+const { info, error, warn } = require('./logger');
+
+// Import bs58 safely
+let bs58;
+try {
+  const imported = require('bs58');
+  bs58 = imported.default ? imported.default : imported;
+} catch (err) {
+  bs58 = require('bs58');
+}
 
 // Inisialisasi Solana Connection
 const connection = new Connection(config.SOLANA_RPC, 'confirmed');
@@ -90,8 +98,8 @@ async function buyToken(tradeParams, userSettings, payerKeypair) {
 
     const inputMint = new PublicKey('So11111111111111111111111111111111111111112'); // SOL mint address
     const outputMint = new PublicKey(mint);
-    const amountInLamports = Math.round(amountSol * LAMPORTS_PER_SOL); // Pastikan integer untuk lamports
-    const slippageBps = slippage * 100; // Konversi persen ke basis poin
+    const amountInLamports = Math.round(amountSol * LAMPORTS_PER_SOL);
+    const slippageBps = slippage * 100;
 
     try {
         // 1. Get quote from Jupiter
@@ -102,13 +110,12 @@ async function buyToken(tradeParams, userSettings, payerKeypair) {
         const swapTransaction = await getJupiterSwapTransaction(quoteResponse, payerKeypair.publicKey);
         const transaction = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
 
-        // 3. Add Jito tip if configured and Jito engine is available
+        // 3. Add Jito tip if configured
         let transactionsToBundle = [transaction];
         if (jitoTip > 0 && config.JITO_ENGINE && config.JITO_TIP_ACCOUNT) {
             const tipLamports = Math.round(jitoTip * LAMPORTS_PER_SOL);
             const tipAccount = new PublicKey(config.JITO_TIP_ACCOUNT);
             
-            // Create a separate tip transaction
             const tipTx = new VersionedTransaction(new TransactionMessage({
                 payerKey: payerKeypair.publicKey,
                 recentBlockhash: (await connection.getLatestBlockhash('finalized')).blockhash,
@@ -119,7 +126,7 @@ async function buyToken(tradeParams, userSettings, payerKeypair) {
                         lamports: tipLamports,
                     })
                 ]
-            }).compileToLegacyMessage()); // Legacy message for simple transfers if not requiring complex versioned tx
+            }).compileToLegacyMessage());
 
             transactionsToBundle.push(tipTx);
             info(`Adding Jito tip of ${jitoTip} SOL.`);
@@ -137,18 +144,15 @@ async function buyToken(tradeParams, userSettings, payerKeypair) {
             info('Sending transaction via Jito bundle...');
             const bundleId = await sendBundleToJito(transactionsToBundle);
             info(`Bundle sent to Jito: ${bundleId}`);
-            // Jito returns bundle ID, you might need to poll for individual tx signatures
-            signature = transactionsToBundle[0].signatures[0].toBase58(); // Primary tx signature as placeholder
+            signature = transactionsToBundle[0].signatures[0].toBase58();
         } else {
             info('Sending transaction directly to Solana RPC (Jito not configured or disabled)...');
             if (transactionsToBundle.length > 1) {
                 warn('Multiple transactions (swap + tip) cannot be sent atomically without Jito bundle or other services.');
-                // For non-Jito, send swap and tip separately if needed
                 const swapSig = await connection.sendTransaction(transactionsToBundle[0], { skipPreflight: false });
                 info(`Swap transaction sent: ${swapSig}`);
                 await connection.confirmTransaction(swapSig, 'confirmed');
                 signature = swapSig;
-                // You might send tipTx separately here if needed
             } else {
                 const swapSig = await connection.sendTransaction(transactionsToBundle[0], { skipPreflight: false });
                 info(`Transaction sent: ${swapSig}`);
@@ -181,12 +185,12 @@ async function sellToken(tradeParams, userSettings, payerKeypair) {
 
     const inputMint = new PublicKey(mint);
     const outputMint = new PublicKey('So11111111111111111111111111111111111111112'); // SOL mint address
-    const slippageBps = slippage * 100; // Konversi persen ke basis poin
+    const slippageBps = slippage * 100;
 
     try {
         // Get token's decimals
         const tokenMintAccount = await connection.getParsedAccountInfo(inputMint);
-        if (!tokenMintAccount || !tokenMintAccount.value) {
+        if (!tokenMintAccount || !tokenMintAccount.value || !tokenMintAccount.value.data.parsed) {
             throw new Error(`Could not find token mint account info for ${mint}`);
         }
         const decimals = tokenMintAccount.value.data.parsed.info.decimals;
