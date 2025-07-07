@@ -13,9 +13,9 @@ async function getPriceOnChain(mint) {
         'x-api-key': config.COINVERA_API
       }
     });
-    // Selalu coba parse JSON untuk mendapatkan detail error, bahkan jika !res.ok
-    const data = await res.json(); // <-- PENTING: Pindahkan ini ke atas
 
+    const data = await res.json();
+    
     if (!res.ok) {
       let errorMessage = `HTTP ${res.status}: ${res.statusText}`;
       if (data && data.error && data.message) {
@@ -23,10 +23,23 @@ async function getPriceOnChain(mint) {
       }
       throw new Error(errorMessage);
     }
+    
+    // PENTING: Konversi string harga menjadi Number di sini
+    const priceInSolNum = parseFloat(data.priceInSol); // Menggunakan parseFloat
+    const priceInUsdNum = parseFloat(data.priceInUsd); // Menggunakan parseFloat
 
-    // Jika berhasil, kembalikan SELURUH data yang diterima
-    return data; // <-- PENTING: Kembalikan seluruh objek data
+    // Tambahkan validasi jika hasil konversi adalah NaN
+    if (isNaN(priceInSolNum) || isNaN(priceInUsdNum)) {
+        throw new Error(`Invalid price format from API: priceInSol or priceInUsd is not a valid number. Raw: ${JSON.stringify(data)}`);
+    }
 
+    // Kembalikan seluruh objek data, tapi dengan harga yang sudah dikonversi menjadi Number
+    return {
+        ...data, // Copy semua properti lain
+        priceInSol: priceInSolNum, // Ganti dengan yang sudah dikonversi
+        priceInUsd: priceInUsdNum  // Ganti dengan yang sudah dikonversi
+    };
+    
   } catch (err) {
     error(`[priceChecker] Failed to fetch price for ${mint}: ${err.message}`);
     return null;
